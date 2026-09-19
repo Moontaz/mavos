@@ -18,6 +18,7 @@ type SpeechRecognitionErrorEventLike = Event & { error: string };
 type SpeechRecognitionLike = {
    continuous: boolean;
    interimResults: boolean;
+   maxAlternatives: number;
    lang: string;
    onstart: (() => void) | null;
    onend: (() => void) | null;
@@ -29,58 +30,61 @@ type SpeechRecognitionLike = {
 };
 
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
-type RecognitionMode = "off" | "wake" | "command";
 
 type WindowWithSpeech = Window & {
    SpeechRecognition?: SpeechRecognitionConstructor;
    webkitSpeechRecognition?: SpeechRecognitionConstructor;
 };
 
+/** Actual state reported by the browser engine. */
+type EngineState = "idle" | "starting" | "running" | "stopping";
+
+export type RecognitionLanguage = "en-US" | "id-ID";
+
 interface UseSpeechRecognitionOptions {
    onFinalTranscript?: (transcript: string) => void;
    onListeningChange?: (listening: boolean) => void;
-   onWakeWord?: () => void;
-   onWakeListeningChange?: (listening: boolean) => void;
+   language?: RecognitionLanguage;
 }
 
-const wakeWordPattern = /\b(?:hey|hi)\s+mavos\b/i;
+/** Silence window after the last speech activity before the session closes. */
+const SILENCE_WINDOW_MS = 3000;
+/** Initial grace period so the user has time to start speaking after pressing Space. */
+const INITIAL_WINDOW_MS = 6000;
+const RESTART_DELAY_MS = 220;
 
 export function useSpeechRecognition({
    onFinalTranscript,
    onListeningChange,
-   onWakeWord,
-   onWakeListeningChange,
+   language = "en-US",
 }: UseSpeechRecognitionOptions = {}) {
    const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
-   const modeRef = useRef<RecognitionMode>("off");
-   const sessionActiveRef = useRef(false);
-   const hasFinalResultRef = useRef(false);
-   const fatalErrorRef = useRef(false);
+   const activeRef = useRef(false);
+   const engineRef = useRef<EngineState>("idle");
    const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-   const commandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-   const finishSessionRef = useRef<(() => void) | null>(null);
-   const wakeBufferRef = useRef("");
+   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   const languageRef = useRef<RecognitionLanguage>(language);
+
    const finalCallbackRef = useRef(onFinalTranscript);
    const listeningCallbackRef = useRef(onListeningChange);
-   const wakeCallbackRef = useRef(onWakeWord);
-   const wakeListeningCallbackRef = useRef(onWakeListeningChange);
+   const controlsRef = useRef<{ setActive: (active: boolean) => void } | null>(
+      null,
+   );
+
    const [isSupported, setIsSupported] = useState(true);
    const [isListening, setIsListening] = useState(false);
-   const [wakeListening, setWakeListening] = useState(false);
    const [interimTranscript, setInterimTranscript] = useState("");
    const [error, setError] = useState<string | null>(null);
 
    useEffect(() => {
       finalCallbackRef.current = onFinalTranscript;
       listeningCallbackRef.current = onListeningChange;
-      wakeCallbackRef.current = onWakeWord;
-      wakeListeningCallbackRef.current = onWakeListeningChange;
-   }, [
-      onFinalTranscript,
-      onListeningChange,
-      onWakeWord,
-      onWakeListeningChange,
-   ]);
+   }, [onFinalTranscript, onListeningChange]);
+
+   useEffect(() => {
+      languageRef.current = language;
+      if (recognitionRef.current) recognitionRef.current.lang = language;
+   }, [language]);
 
    useEffect(() => {
       const speechWindow = window as WindowWithSpeech;
@@ -93,110 +97,103 @@ export function useSpeechRecognition({
       }
 
       const recognition = new Recognition();
-      // Keeping one session alive lets the browser wait for the wake phrase.
       recognition.continuous = true;
       recognition.interimResults = true;
-      recognition.lang = "en-US";
+      recognition.maxAlternatives = 3;
+      recognition.lang = languageRef.current;
+      recognitionRef.current = recognition;
 
-      const clearTimers = () => {
+      const clearRestartTimer = () => {
          if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-         if (commandTimerRef.current) clearTimeout(commandTimerRef.current);
          restartTimerRef.current = null;
-         commandTimerRef.current = null;
       };
 
-      const finishSession = () => {
-         sessionActiveRef.current = false;
-         modeRef.current = "off";
-         clearTimers();
-         recognition.stop();
-         setIsListening(false);
-         setWakeListening(false);
-         listeningCallbackRef.current?.(false);
-         wakeListeningCallbackRef.current?.(false);
-         setInterimTranscript("");
+      const clearSilenceTimer = () => {
+         if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+         silenceTimerRef.current = null;
       };
 
-      finishSessionRef.current = finishSession;
-
-      const finishCommand = (value: string) => {
-         if (!value.trim() || modeRef.current !== "command") return;
-         hasFinalResultRef.current = true;
-         finalCallbackRef.current?.(value.trim());
-         finishSession();
+      const armSilenceWindow = (duration: number) => {
+         clearSilenceTimer();
+         silenceTimerRef.current = setTimeout(() => {
+            if (activeRef.current) setActive(false);
+         }, duration);
       };
 
-      const armCommandWindow = () => {
-         if (commandTimerRef.current) clearTimeout(commandTimerRef.current);
-         commandTimerRef.current = setTimeout(() => {
-            if (modeRef.current === "command") finishSession();
-         }, 3000);
-      };
+      /** Single entry point for engine control; prevents overlapping start/stop. */
+      const syncEngine = () => {
+         const engine = engineRef.current;
 
-      const activateCommandMode = (remainder = "") => {
-         wakeBufferRef.current = "";
-         modeRef.current = "command";
-         hasFinalResultRef.current = false;
-         setWakeListening(false);
-         setIsListening(true);
-         wakeListeningCallbackRef.current?.(false);
-         listeningCallbackRef.current?.(true);
-         wakeCallbackRef.current?.();
-         armCommandWindow();
-         if (remainder.trim()) finishCommand(remainder);
-      };
+         if (!activeRef.current) {
+            clearRestartTimer();
+            if (engine === "running" || engine === "starting") {
+               engineRef.current = "stopping";
+               try {
+                  recognition.stop();
+               } catch {
+                  engineRef.current = "idle";
+               }
+            }
+            return;
+         }
 
-      const scheduleRestart = () => {
-         if (!sessionActiveRef.current || restartTimerRef.current) return;
-         restartTimerRef.current = setTimeout(() => {
-            restartTimerRef.current = null;
-            if (!sessionActiveRef.current) return;
+         if (engine === "idle") {
+            engineRef.current = "starting";
             try {
                recognition.start();
             } catch {
-               scheduleRestart();
+               // InvalidStateError means the engine is still winding down; retry shortly.
+               engineRef.current = "idle";
+               clearRestartTimer();
+               restartTimerRef.current = setTimeout(() => {
+                  restartTimerRef.current = null;
+                  if (activeRef.current) syncEngine();
+               }, RESTART_DELAY_MS);
             }
-         }, 180);
+         }
       };
 
-      recognition.onstart = () => {
-         setError(null);
-         if (modeRef.current === "wake") {
-            setWakeListening(true);
-            wakeListeningCallbackRef.current?.(true);
-         } else if (modeRef.current === "command") {
-            setIsListening(true);
-            listeningCallbackRef.current?.(true);
+      function setActive(next: boolean) {
+         if (activeRef.current === next) {
+            if (next) syncEngine();
+            return;
          }
+         activeRef.current = next;
+         setInterimTranscript("");
+         if (next) armSilenceWindow(INITIAL_WINDOW_MS);
+         else clearSilenceTimer();
+         setIsListening(next);
+         listeningCallbackRef.current?.(next);
+         syncEngine();
+      }
+
+      recognition.onstart = () => {
+         engineRef.current = "running";
+         setError(null);
+         if (!activeRef.current) syncEngine();
       };
 
       recognition.onend = () => {
-         if (
-            sessionActiveRef.current &&
-            !hasFinalResultRef.current &&
-            !fatalErrorRef.current
-         ) {
-            scheduleRestart();
-            return;
+         engineRef.current = "idle";
+         // Browsers end the session on silence; restart while the user still wants to listen.
+         if (activeRef.current) {
+            clearRestartTimer();
+            restartTimerRef.current = setTimeout(() => {
+               restartTimerRef.current = null;
+               if (activeRef.current) syncEngine();
+            }, RESTART_DELAY_MS);
          }
-         if (!sessionActiveRef.current) {
-            setIsListening(false);
-            setWakeListening(false);
-            return;
-         }
-         finishSession();
       };
 
       recognition.onerror = (event) => {
-         // Browsers emit no-speech when the user pauses. Keep wake listening alive.
+         // Recoverable: the user simply has not spoken yet.
          if (event.error === "no-speech" || event.error === "aborted") return;
-         if (!sessionActiveRef.current) return;
-         fatalErrorRef.current = true;
          setError(event.error);
-         finishSession();
+         setActive(false);
       };
 
       recognition.onresult = (event) => {
+         if (!activeRef.current) return;
          let interim = "";
          let final = "";
          for (
@@ -205,115 +202,52 @@ export function useSpeechRecognition({
             index += 1
          ) {
             const result = event.results[index];
-            if (result.isFinal) final += result[0].transcript;
-            else interim += result[0].transcript;
+            if (result.isFinal) final += `${result[0].transcript} `;
+            else interim += `${result[0].transcript} `;
          }
 
-         if (modeRef.current === "command") setInterimTranscript(interim);
-         if (!final.trim()) return;
+         setInterimTranscript(interim.trim());
+         // Speech activity keeps the window open so long sentences are never cut.
+         if (interim.trim() || final.trim())
+            armSilenceWindow(SILENCE_WINDOW_MS);
 
-         if (modeRef.current === "wake") {
-            wakeBufferRef.current = `${wakeBufferRef.current} ${final}`
-               .trim()
-               .split(/\s+/)
-               .slice(-8)
-               .join(" ");
-            const wakeMatch = wakeBufferRef.current.match(wakeWordPattern);
-            if (!wakeMatch || wakeMatch.index === undefined) return;
-            const remainder = wakeBufferRef.current
-               .slice(wakeMatch.index + wakeMatch[0].length)
-               .trim();
-            activateCommandMode(remainder);
-            return;
-         }
-
-         finishCommand(final);
+         const trimmed = final.trim();
+         if (!trimmed) return;
+         setActive(false);
+         finalCallbackRef.current?.(trimmed);
       };
 
-      recognitionRef.current = recognition;
+      controlsRef.current = { setActive };
 
       return () => {
-         sessionActiveRef.current = false;
-         modeRef.current = "off";
-         clearTimers();
+         activeRef.current = false;
+         controlsRef.current = null;
+         clearRestartTimer();
+         clearSilenceTimer();
          recognition.onstart = null;
          recognition.onend = null;
          recognition.onresult = null;
          recognition.onerror = null;
-         finishSessionRef.current = null;
-         recognition.abort();
+         try {
+            recognition.abort();
+         } catch {
+            // The engine may already be torn down.
+         }
+         engineRef.current = "idle";
          recognitionRef.current = null;
       };
    }, []);
 
    const start = useCallback(() => {
-      const recognition = recognitionRef.current;
-      if (!recognition || sessionActiveRef.current) return false;
-      sessionActiveRef.current = true;
-      modeRef.current = "command";
-      wakeBufferRef.current = "";
-      hasFinalResultRef.current = false;
-      fatalErrorRef.current = false;
+      if (!controlsRef.current) return false;
       setError(null);
-      setInterimTranscript("");
-      try {
-         // Manual listening stays active until a command is recognized or Stop is pressed.
-         // The three-second window is armed only after the wake phrase.
-         recognition.start();
-         return true;
-      } catch {
-         sessionActiveRef.current = false;
-         modeRef.current = "off";
-         setError("start-failed");
-         return false;
-      }
-   }, []);
-
-   const startWakeWordListening = useCallback(() => {
-      const recognition = recognitionRef.current;
-      if (!recognition || sessionActiveRef.current) return false;
-      sessionActiveRef.current = true;
-      modeRef.current = "wake";
-      wakeBufferRef.current = "";
-      hasFinalResultRef.current = false;
-      fatalErrorRef.current = false;
-      setError(null);
-      setInterimTranscript("");
-      try {
-         recognition.start();
-         return true;
-      } catch {
-         sessionActiveRef.current = false;
-         modeRef.current = "off";
-         setError("start-failed");
-         return false;
-      }
+      controlsRef.current.setActive(true);
+      return true;
    }, []);
 
    const stop = useCallback(() => {
-      sessionActiveRef.current = false;
-      modeRef.current = "off";
-      fatalErrorRef.current = false;
-      if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-      if (commandTimerRef.current) clearTimeout(commandTimerRef.current);
-      restartTimerRef.current = null;
-      commandTimerRef.current = null;
-      recognitionRef.current?.stop();
-      setIsListening(false);
-      setWakeListening(false);
-      listeningCallbackRef.current?.(false);
-      wakeListeningCallbackRef.current?.(false);
-      setInterimTranscript("");
+      controlsRef.current?.setActive(false);
    }, []);
 
-   return {
-      isSupported,
-      isListening,
-      wakeListening,
-      interimTranscript,
-      error,
-      start,
-      startWakeWordListening,
-      stop,
-   };
+   return { isSupported, isListening, interimTranscript, error, start, stop };
 }

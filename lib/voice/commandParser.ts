@@ -8,80 +8,169 @@ const normalize = (value: string) =>
       .replace(/\s+/g, " ")
       .trim();
 
+/**
+ * Aliases are ordered from most specific to least specific. Longer phrases are
+ * checked first so "previous project" is never swallowed by "back".
+ * Indonesian and English variants live side by side.
+ */
 const routes: Array<{
    action: CommandAction;
    aliases: string[];
    label: string;
 }> = [
    {
-      action: "SHOW_HOME",
-      aliases: ["home", "go home", "take me home", "show home"],
-      label: "GO HOME",
+      action: "NEXT_PROJECT",
+      aliases: [
+         "next project",
+         "show next project",
+         "proyek selanjutnya",
+         "proyek berikutnya",
+         "project selanjutnya",
+         "project berikutnya",
+         "selanjutnya",
+         "berikutnya",
+      ],
+      label: "NEXT PROJECT",
+   },
+   {
+      action: "PREVIOUS_PROJECT",
+      aliases: [
+         "previous project",
+         "show previous project",
+         "proyek sebelumnya",
+         "project sebelumnya",
+         "sebelumnya",
+      ],
+      label: "PREVIOUS PROJECT",
    },
    {
       action: "SHOW_EXPERIENCE",
       aliases: [
-         "experience",
          "voice experience",
          "open experience",
          "show experience",
+         "experience",
+         "buka pengalaman",
+         "pengalaman suara",
+         "mode suara",
+         "buka mode suara",
       ],
       label: "OPEN EXPERIENCE",
    },
    {
       action: "SHOW_PROJECTS",
       aliases: [
-         "projects",
-         "show projects",
-         "show my projects",
          "show me your projects",
-         "work",
+         "show my projects",
+         "show projects",
+         "projects",
          "portfolio",
+         "work",
+         "tampilkan proyek",
+         "tampilkan project",
+         "lihat proyek",
+         "lihat project",
+         "buka proyek",
+         "buka project",
+         "tunjukkan proyek",
+         "tunjukkan project",
+         "proyek saya",
+         "proyek",
+         "portofolio",
+         "karya",
       ],
       label: "SHOW PROJECTS",
    },
    {
       action: "SHOW_ABOUT",
       aliases: [
-         "about",
-         "about me",
          "tell me about you",
          "who are you",
-         "who are you",
+         "about me",
+         "about",
+         "tentang saya",
+         "tentang kamu",
+         "tentang",
+         "siapa kamu",
+         "ceritakan tentang kamu",
+         "profil",
       ],
       label: "OPEN ABOUT",
    },
    {
-      action: "GO_BACK",
-      aliases: ["go back", "back", "previous page"],
-      label: "GO BACK",
+      action: "SHOW_HOME",
+      aliases: [
+         "take me home",
+         "go home",
+         "show home",
+         "home",
+         "beranda",
+         "ke beranda",
+         "kembali ke beranda",
+         "halaman utama",
+         "ke halaman utama",
+         "pulang",
+      ],
+      label: "GO HOME",
    },
    {
       action: "GO_FORWARD",
-      aliases: ["go forward", "forward", "next page"],
+      aliases: [
+         "go forward",
+         "forward",
+         "next page",
+         "maju",
+         "halaman selanjutnya",
+      ],
       label: "GO FORWARD",
    },
    {
-      action: "NEXT_PROJECT",
-      aliases: ["next project", "show next project"],
-      label: "NEXT PROJECT",
-   },
-   {
-      action: "PREVIOUS_PROJECT",
-      aliases: ["previous project", "show previous project"],
-      label: "PREVIOUS PROJECT",
-   },
-   {
-      action: "HELP",
-      aliases: ["help", "i need help", "what can i say"],
-      label: "OPEN HELP",
+      action: "GO_BACK",
+      aliases: [
+         "go back",
+         "previous page",
+         "back",
+         "kembali",
+         "balik",
+         "mundur",
+         "halaman sebelumnya",
+      ],
+      label: "GO BACK",
    },
    {
       action: "SHOW_COMMANDS",
-      aliases: ["commands", "show commands", "command guide"],
+      aliases: [
+         "show commands",
+         "command guide",
+         "commands",
+         "daftar perintah",
+         "perintah apa saja",
+         "apa yang bisa saya katakan",
+         "apa yang bisa aku katakan",
+      ],
       label: "SHOW COMMANDS",
    },
+   {
+      action: "HELP",
+      aliases: [
+         "what can i say",
+         "i need help",
+         "help",
+         "bantuan",
+         "tolong",
+         "bantu",
+      ],
+      label: "OPEN HELP",
+   },
 ];
+
+const openVerbs =
+   /\b(open|show|view|visit|see|buka|tampilkan|lihat|tunjukkan|masuk)\b/;
+
+const hasWordBoundaryMatch = (value: string, alias: string) => {
+   const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+   return new RegExp(`(^|\\s)${escaped}(\\s|$)`).test(value);
+};
 
 export function parseCommand(transcript: string): VoiceCommand | null {
    const value = normalize(transcript);
@@ -89,7 +178,9 @@ export function parseCommand(transcript: string): VoiceCommand | null {
 
    const project = projects.find((item) => {
       const title = normalize(item.title);
-      return value.includes(title) && /open|show|view|visit|see/.test(value);
+      return (
+         value.includes(title) && (openVerbs.test(value) || value === title)
+      );
    });
 
    if (project) {
@@ -102,7 +193,9 @@ export function parseCommand(transcript: string): VoiceCommand | null {
    }
 
    const route = routes.find((item) =>
-      item.aliases.some((alias) => value === alias || value.includes(alias)),
+      item.aliases.some(
+         (alias) => value === alias || hasWordBoundaryMatch(value, alias),
+      ),
    );
    if (!route) return null;
    return {
@@ -116,23 +209,28 @@ export const commandExamples = [
    {
       category: "Navigation",
       items: [
-         "Go home",
-         "Show my projects",
-         "Tell me about you",
-         "Open experience",
+         "Go home / Ke beranda",
+         "Show my projects / Tampilkan proyek",
+         "Tell me about you / Tentang kamu",
+         "Open experience / Buka mode suara",
       ],
    },
    {
       category: "Projects",
       items: [
-         "Open Saling Pandu",
+         "Open Saling Pandu / Buka Saling Pandu",
          "Open Smile Detector",
          "Open MAVOS",
-         "Next project",
+         "Next project / Proyek selanjutnya",
       ],
    },
    {
       category: "System",
-      items: ["Hey MAVOS, show projects", "Help", "What can I say?", "Go back"],
+      items: [
+         "Press Space to talk",
+         "Help / Bantuan",
+         "Go back / Kembali",
+         "What can I say? / Daftar perintah",
+      ],
    },
 ];

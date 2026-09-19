@@ -1063,6 +1063,38 @@ button {
 .voice-dock-footer button:hover {
    color: #fff;
 }
+.language-switch {
+   align-items: center;
+   display: flex;
+   gap: 6px;
+}
+.language-switch span {
+   color: rgba(243, 243, 240, 0.35);
+}
+.language-switch button {
+   opacity: 0.45;
+   padding: 2px 0;
+   position: relative;
+   transition: opacity 0.3s ease;
+}
+.language-switch button::after {
+   background: currentColor;
+   bottom: -2px;
+   content: "";
+   height: 1px;
+   left: 0;
+   position: absolute;
+   transform: scaleX(0);
+   transform-origin: left;
+   transition: transform 0.35s var(--ease);
+   width: 100%;
+}
+.language-switch button.active {
+   opacity: 1;
+}
+.language-switch button.active::after {
+   transform: scaleX(1);
+}
 .overlay-backdrop {
    align-items: center;
    background: rgba(11, 11, 11, 0.72);
@@ -1250,7 +1282,7 @@ button {
    color: rgba(243, 243, 240, 0.5);
 }
 .onboarding-content h1 {
-   font-size: clamp(3.5rem, 8.5vw, 9.5rem);
+   font-size: clamp(3.5rem, 6vw, 9.5rem);
    font-weight: 400;
    letter-spacing: -0.1em;
    line-height: 0.82;

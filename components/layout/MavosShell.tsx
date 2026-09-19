@@ -14,6 +14,7 @@ import {
 } from "react";
 import { projects } from "@/data/projects";
 import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
+import type { RecognitionLanguage } from "@/hooks/useSpeechRecognition";
 import { parseCommand } from "@/lib/voice/commandParser";
 import type { VoiceCommand, VoiceState } from "@/lib/types";
 import { CommandGuide } from "@/components/voice/CommandGuide";
@@ -28,7 +29,6 @@ interface MavosContextValue {
    command: VoiceCommand | null;
    history: VoiceCommand[];
    isListening: boolean;
-   wakeListening: boolean;
    isSupported: boolean;
    voiceOpen: boolean;
    guideOpen: boolean;
@@ -36,8 +36,9 @@ interface MavosContextValue {
    onboardingOpen: boolean;
    tutorialMode: boolean;
    errorMessage: string | null;
+   language: RecognitionLanguage;
+   setLanguage: (language: RecognitionLanguage) => void;
    startListening: () => void;
-   startWakeWordListening: () => void;
    stopListening: () => void;
    toggleVoice: () => void;
    openGuide: () => void;
@@ -84,10 +85,10 @@ function MavosProvider({ children }: { children: ReactNode }) {
    const [onboardingOpen, setOnboardingOpen] = useState(false);
    const [tutorialMode, setTutorialMode] = useState(false);
    const [errorMessage, setErrorMessage] = useState<string | null>(null);
+   const [language, setLanguage] = useState<RecognitionLanguage>("en-US");
    const executionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
    const lastCommand = useRef({ value: "", at: 0 });
    const previousPath = useRef(pathname);
-   const sessionStatus = useRef({ isListening: false, wakeListening: false });
 
    const executeCommand = useCallback(
       (nextCommand: VoiceCommand) => {
@@ -168,7 +169,11 @@ function MavosProvider({ children }: { children: ReactNode }) {
          const parsed = parseCommand(value);
          if (!parsed) {
             setCommand(null);
-            setErrorMessage("I DIDN'T CATCH THAT. TRY HELP.");
+            setErrorMessage(
+               language === "id-ID"
+                  ? "AKU BELUM MENANGKAP ITU. COBA 'BANTUAN'."
+                  : "I DIDN'T CATCH THAT. TRY HELP.",
+            );
             setVoiceState("ERROR");
             setTimeout(() => setVoiceState("IDLE"), 1800);
             return;
@@ -185,7 +190,7 @@ function MavosProvider({ children }: { children: ReactNode }) {
             setVoiceState("SUCCESS");
          }
       },
-      [executeCommand, tutorialMode],
+      [executeCommand, language, tutorialMode],
    );
 
    const handleListeningChange = useCallback((listening: boolean) => {
@@ -197,40 +202,46 @@ function MavosProvider({ children }: { children: ReactNode }) {
       });
    }, []);
 
-   const handleWakeWord = useCallback(() => {
-      setVoiceOpen(true);
-      setTranscript("hey mavos");
-      setErrorMessage(null);
-      setVoiceState("LISTENING");
-   }, []);
-
    const speech = useSpeechRecognition({
       onFinalTranscript: handleFinalTranscript,
       onListeningChange: handleListeningChange,
-      onWakeWord: handleWakeWord,
+      language,
    });
-   const {
-      error,
-      interimTranscript,
-      isListening,
-      wakeListening,
-      isSupported,
-      start,
-      startWakeWordListening,
-      stop,
-   } = speech;
-   sessionStatus.current = { isListening, wakeListening };
+   const { error, interimTranscript, isListening, isSupported, start, stop } =
+      speech;
 
    useEffect(() => {
       if (error) {
          setErrorMessage(
-            error === "not-allowed"
+            error === "not-allowed" || error === "service-not-allowed"
                ? "MICROPHONE ACCESS DENIED"
-               : "SOMETHING WENT WRONG",
+               : error === "audio-capture"
+                 ? "NO MICROPHONE DETECTED"
+                 : error === "network"
+                   ? "SPEECH SERVICE UNREACHABLE"
+                   : "SOMETHING WENT WRONG",
          );
          setVoiceState("ERROR");
       }
    }, [error]);
+
+   useEffect(() => {
+      try {
+         const stored = window.localStorage.getItem("mavos_language");
+         if (stored === "id-ID" || stored === "en-US") setLanguage(stored);
+      } catch {
+         // Default language stays in effect.
+      }
+   }, []);
+
+   const changeLanguage = useCallback((next: RecognitionLanguage) => {
+      setLanguage(next);
+      try {
+         window.localStorage.setItem("mavos_language", next);
+      } catch {
+         // Ignore storage failures.
+      }
+   }, []);
 
    useEffect(() => {
       try {
@@ -248,45 +259,11 @@ function MavosProvider({ children }: { children: ReactNode }) {
       };
    }, [stop]);
 
-   const startWakeWord = useCallback(() => {
-      if (!isSupported) return;
-      const started = startWakeWordListening();
-      if (!started) setVoiceState("ERROR");
-   }, [isSupported, startWakeWordListening]);
-
    useEffect(() => {
-      if (previousPath.current !== pathname) {
-         if (
-            sessionStatus.current.isListening ||
-            sessionStatus.current.wakeListening
-         )
-            stop();
-         try {
-            if (window.localStorage.getItem("mavos_onboarding_completed")) {
-               const timer = window.setTimeout(startWakeWord, 500);
-               previousPath.current = pathname;
-               return () => window.clearTimeout(timer);
-            }
-         } catch {
-            // Private browsing may not expose localStorage; manual voice still works.
-         }
-      }
+      // Leaving a route always releases the microphone.
+      if (previousPath.current !== pathname) stop();
       previousPath.current = pathname;
-   }, [pathname, startWakeWord, stop]);
-
-   useEffect(() => {
-      let timer: number | undefined;
-      try {
-         if (window.localStorage.getItem("mavos_onboarding_completed")) {
-            timer = window.setTimeout(startWakeWord, 500);
-         }
-      } catch {
-         // The user can still start voice interaction from the button.
-      }
-      return () => {
-         if (timer) window.clearTimeout(timer);
-      };
-   }, [startWakeWord]);
+   }, [pathname, stop]);
 
    const startListening = useCallback(() => {
       setVoiceOpen(true);
@@ -295,17 +272,9 @@ function MavosProvider({ children }: { children: ReactNode }) {
          setVoiceState("UNSUPPORTED");
          return;
       }
-      if (wakeListening) {
-         stop();
-         window.setTimeout(() => {
-            const started = start();
-            if (!started) setVoiceState("ERROR");
-         }, 160);
-         return;
-      }
       const started = start();
       if (!started) setVoiceState("ERROR");
-   }, [isSupported, start, stop, wakeListening]);
+   }, [isSupported, start]);
 
    const stopListening = useCallback(() => {
       stop();
@@ -327,8 +296,7 @@ function MavosProvider({ children }: { children: ReactNode }) {
       setOnboardingOpen(false);
       setVoiceState("IDLE");
       stop();
-      window.setTimeout(startWakeWord, 220);
-   }, [startWakeWord, stop]);
+   }, [stop]);
 
    const reopenOnboarding = useCallback(() => {
       setOnboardingOpen(true);
@@ -343,7 +311,6 @@ function MavosProvider({ children }: { children: ReactNode }) {
          command,
          history,
          isListening,
-         wakeListening,
          isSupported,
          voiceOpen,
          guideOpen,
@@ -351,8 +318,9 @@ function MavosProvider({ children }: { children: ReactNode }) {
          onboardingOpen,
          tutorialMode,
          errorMessage,
+         language,
+         setLanguage: changeLanguage,
          startListening,
-         startWakeWordListening: startWakeWord,
          stopListening,
          toggleVoice,
          openGuide: () => setGuideOpen(true),
@@ -371,7 +339,6 @@ function MavosProvider({ children }: { children: ReactNode }) {
          command,
          history,
          isListening,
-         wakeListening,
          isSupported,
          voiceOpen,
          guideOpen,
@@ -379,8 +346,9 @@ function MavosProvider({ children }: { children: ReactNode }) {
          onboardingOpen,
          tutorialMode,
          errorMessage,
+         language,
+         changeLanguage,
          startListening,
-         startWakeWord,
          stopListening,
          toggleVoice,
          completeOnboarding,
@@ -396,8 +364,7 @@ function MavosProvider({ children }: { children: ReactNode }) {
 
 function Navigation() {
    const pathname = usePathname();
-   const { toggleVoice, isListening, wakeListening, openGuide, openPalette } =
-      useMavos();
+   const { toggleVoice, isListening, openGuide, openPalette } = useMavos();
    const [menuOpen, setMenuOpen] = useState(false);
    const links = [
       { href: "/", label: "Home" },
@@ -459,17 +426,15 @@ function Navigation() {
          </nav>
          <div className="header-actions">
             <button
-               className={`voice-trigger ${isListening || wakeListening ? "is-listening" : ""}`}
+               className={`voice-trigger ${isListening ? "is-listening" : ""}`}
                onClick={toggleVoice}
                aria-label={
-                  isListening || wakeListening
-                     ? "Stop listening"
-                     : "Start voice control"
+                  isListening ? "Stop listening" : "Start voice control"
                }
             >
                <span className="voice-trigger-line" />
-               {isListening || wakeListening ? "Stop" : "Voice"}
-               <span className="voice-trigger-key">Hey MAVOS</span>
+               {isListening ? "Stop" : "Voice"}
+               <span className="voice-trigger-key">Space</span>
             </button>
             <button
                className="menu-trigger"

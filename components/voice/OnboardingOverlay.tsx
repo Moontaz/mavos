@@ -229,7 +229,7 @@ export function OnboardingOverlay() {
             <span>
                {step === "check" && voiceState === "LISTENING"
                   ? "SPEAK CLEARLY"
-                  : "MAVOS 2024"}
+                  : "MAVOS 2026"}
             </span>
          </div>
       </div>

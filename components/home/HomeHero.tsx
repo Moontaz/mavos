@@ -48,7 +48,7 @@ export function HomeHero() {
 
    return (
       <section className="home-hero" ref={ref}>
-         <div className="hero-corner hero-corner-tl">© / 24</div>
+         <div className="hero-corner hero-corner-tl">© / 26</div>
          <div className="hero-corner hero-corner-tr">BROWSER / VOICE</div>
          <div className="hero-main">
             <div className="hero-prelude" data-hero-meta>
